@@ -957,18 +957,134 @@ func encode(a obj.As) *inst {
     except:
         pass
 
+def make_dafny(instr_dict):
+    names_str = ''
+    decode_str = 'method DecodeInstruction(data: bv32, width: nat) returns (instr: Instruction)\n  requires width % 16 == 0\n{\n'
+    decode_conditions_str = ''
+    print_str = 'method PrintInstruction(instr: Instruction)\n{\n  match instr\n  {\n    case Unrecognised() =>\n      {\n        print "Unrecognised";\n      }\n'
+    field_type_names = set()
+
+    for i in instr_dict:
+        instr = instr_dict[i]
+        instr_name = i.upper().replace('.','_')
+        
+        fields = instr['variable_fields']
+        field_defs_str = ''
+        field_decodes_str = ''
+        fields_str = ''
+        field_conditions_str = ''
+        print_fields_str = ''
+        for v in fields:
+            type_name = f"{v[0].upper()}{v[1:]}"
+            field_defs_str += f", {v}: {type_name}"
+            field_decodes_str += f", Decode{type_name}(data)"
+            fields_str += f", {v}"
+            field_conditions_str += f" && Valid{type_name}(data)"
+            print_fields_str += f'        print " {v}:";\n'
+            print_fields_str += f"        Print{type_name}(instr.{v});\n"
+
+            field_type_names.add(type_name)
+
+        field_defs_str = field_defs_str[2:]
+        field_decodes_str = field_decodes_str[2:]
+        fields_str = fields_str[2:]
+
+        names_str += f"  | {instr_name:<18s}({field_defs_str})\n"
+
+        extra_conditions = " && width == 16" if v[:2] == 'c_' else " && width == 32"
+        decode_conditions_str += f"""  else if (data & {instr['mask']}) == {instr['match']}{extra_conditions}{field_conditions_str}
+  {'{'}
+    return {instr_name}({field_decodes_str});
+  {'}'}
+"""
+
+        print_str += f"""    case {instr_name}({fields_str}) =>
+      {'{'}
+        print "{instr_name}";
+        {print_fields_str[8:-1]}
+      {'}'}
+"""
+        #  = 32'b{instr['encoding'].replace('-','?')};\n
+    
+    # for num, name in csrs+csrs32:
+    #     names_str += f"  localparam logic [11:0] CSR_{name.upper()} = 12'h{hex(num)[2:]};\n"
+
+    print_str += '\n    }\n}\n'
+    decode_conditions_str = " " + decode_conditions_str[6:]
+    decode_str += decode_conditions_str + '  else\n  {\n    return Unrecognised();\n  }\n}\n'
+
+    field_types_str = ''
+    for type_name in sorted(field_type_names):
+        field_bit_positions = arg_lut[type_name.lower()]
+        field_width = 1 + field_bit_positions[0] - field_bit_positions[1]
+        field_max_val = generate_1s(field_width)
+        field_max_val_hex_str = hex(field_max_val).upper().replace("X", "x")
+        is_not_two = "n2" in type_name
+        is_non_zero = "n0" in type_name or "nz" in type_name or is_not_two
+        field_min_val_cond = "0 < " if is_non_zero else ""
+        field_max_val_cond = f' <= {field_max_val_hex_str}'
+        field_not_eq_cond = " && i != 2" if is_not_two else ""
+        witness = " witness 1" if is_non_zero else ""
+        field_types_str += f'newtype {type_name} = i: nat | {field_min_val_cond}i{field_max_val_cond}{field_not_eq_cond}{witness}\n'
+        field_extract_str = f"(data >> {field_bit_positions[1]}) & {field_max_val_hex_str}"
+        decode_str += f"""
+function Extract{type_name}(data: bv32): bv32
+{"{"}
+  // TODO: Extract the bits in the right order/positions
+  {field_extract_str}
+{"}"}
+
+predicate Valid{type_name}(data: bv32)
+{"{"}
+  var i: nat := Extract{type_name}(data) as nat;
+  {field_min_val_cond}i{field_max_val_cond}{" && i != 2" if is_not_two else ""}
+{"}"}
+
+function Decode{type_name}(data: bv32): (v: {type_name})
+    requires Valid{type_name}(data)
+{"{"}
+  Extract{type_name}(data) as {type_name}
+{"}"}
+"""
+        print_str += f"""
+method Print{type_name}(v: {type_name})
+{"{"}
+  print v;
+{"}"}
+"""
+    field_types_str = field_types_str[:-1]
+
+    print_str = print_str[:-1]
+    decode_str = decode_str[:-1]
+
+    dafny_file = open('instruction.dfy','w')
+    dafny_file.write(f'''{field_types_str}
+
+datatype Instruction =
+  | Unrecognised()
+{names_str}
+{decode_str}
+{print_str}
+''')
+    dafny_file.close()
+
 def signed(value, width):
   if 0 <= value < (1<<(width-1)):
     return value
   else:
     return value - (1<<width)
 
+def generate_1s(count):
+    result = 0
+    for n in range(0, count):
+        result = result | (1 << n)
+    return result
 
 if __name__ == "__main__":
     print(f'Running with args : {sys.argv}')
 
     extensions = sys.argv[1:]
-    for i in ['-c','-latex','-chisel','-sverilog','-rust', '-go', '-spinalhdl']:
+    for i in ['-c','-latex','-chisel','-sverilog','-rust', '-go', '-spinalhdl','-dafny']:
         if i in extensions:
             extensions.remove(i)
     print(f'Extensions selected : {extensions}')
@@ -1000,6 +1116,10 @@ if __name__ == "__main__":
     if '-sverilog' in sys.argv[1:]:
         make_sverilog(instr_dict)
         logging.info('inst.sverilog generated successfully')
+
+    if '-dafny' in sys.argv[1:]:
+        make_dafny(instr_dict)
+        logging.info('instruction.dfy generated successfully')
 
     if '-rust' in sys.argv[1:]:
         make_rust(instr_dict)

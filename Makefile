@@ -1,4 +1,4 @@
-EXTENSIONS := "rv*" "unratified/rv*"
+EXTENSIONS := "rv_i" "rv_c" "rv64_i" "rv64_c"
 ISASIM_H := ../riscv-isa-sim/riscv/encoding.h
 PK_H := ../riscv-pk/machine/encoding.h
 ENV_H := ../riscv-tests/env/encoding.h
@@ -9,7 +9,7 @@ default: everything
 
 .PHONY : everything
 everything:
-	@./parse.py -c -go -chisel -sverilog -rust -latex -spinalhdl $(EXTENSIONS)
+	@./parse.py -c -go -chisel -sverilog -rust -latex -spinalhdl -dafny $(EXTENSIONS)
 
 .PHONY : encoding.out.h
 encoding.out.h:
